@@ -1,0 +1,155 @@
+{
+  "_documentation": {
+    "dataset_name": "Nome lógico do dataset. Exemplo: sap_provisoes",
+    "version": "Versão da configuração. Exemplo: 1.0",
+    "criticality": "Valores permitidos: low, medium, high, critical",
+    "classification": "Valores permitidos: public, internal, confidential, restricted",
+    "contains_pii": "true quando existir dado pessoal (LGPD)",
+    "pii_columns": "Informar colunas que possuem dados pessoais. Exemplo: cpf, email, telefone. Deixar vazio quando contains_pii=false",
+    "file_format": "Valores permitidos: csv, xlsx, json, parquet, txt",
+    "schema_mode": "Valores permitidos: true, false",
+    "delimiter": "Para csv/txt. Valores comuns: ; , | TAB",
+    "encoding": "utf-8 como padrao, para casos que usem outro encoding incluir o encoding correto",
+    "header": "Indica se a primeira linha possui cabeçalho",
+    "header_row": "Indica a linha em que o header começa, caso seja na primiera colocar 1, atenção o numero não vai entre aspas.",
+    "incremental_key": "Indica a coluna que será usada como chave para datasets que tem o tipo de atualização incremental",
+    "incremental_format": "Indica o formato do dado da coluna incremental_key exemplo dd.MM.yyyy",
+    "sheet_name": "Obrigatório apenas para xlsx. Exemplo: Plan1. Para outros formatos deixar vazio",
+    "multiline": "Utilizado apenas para JSON. true para JSON multilinha. Para os demais formatos utilizar false",
+    "expected_columns": "Lista de todas as colunas esperadas. Ausências geram warning",
+    "required_columns": "Lista de colunas obrigatórias. Ausências geram rejeição do arquivo",
+    "partition_columns": "Colunas utilizadas para particionamento do lakehouse",
+    "load_strategy": "Valores permitidos: append, overwrite, overwrite_partition. Recomendado: overwrite_partition",
+    "compression": "Valores permitidos: snappy, gzip, none. Recomendado: snappy",
+    "target_format": "Formato de saída da camada. Padrão da plataforma: parquet",
+    "schema_override": "Sobrescreve tipos herdados da RAW. Utilizar apenas em exceções. Exemplo: {\"valor\":\"decimal(18,2)\"}",
+    "primary_key": "Chave lógica do dataset utilizada para validações e deduplicação",
+    "deduplicate": "Habilita remoção de duplicidades. Recomendado: false",
+    "deduplication_keys": "Preencher somente quando deduplicate=true",
+    "business_owner": "Área responsável pela camada Curated",
+    "raw_enabled": "Habilita processamento Landing -> Raw",
+    "trusted_enabled": "Habilita processamento Raw -> Trusted",
+    "curated_enabled": "Habilita processamento Trusted -> Curated",
+    "allow_reprocess": "Permite reprocessar arquivos já tratados anteriormente",
+    "track_etag": "Controla reprocessamento na camada Raw utilizando ETag do objeto S3",
+    "raw_signature": "Hash calculado a partir dos arquivos presentes na camada RAW (Key, Size e LastModified). Utilizado para controle incremental e reprocessamento da camada Trusted.",
+    "create_glue_table": "Controla atualização automática do Glue Catalog",
+    "scope": "Valores permitidos: process, shared. Utilizar shared para datasets reutilizados por múltiplos processos.",
+    "curated_outputs": "Lista de datasets de saída permitidos para a camada Curated. Exemplo: [\"dre_mensal\",\"indicadores_opex\"]",
+    "update_frequency": "Valores permitidos: hourly, daily, weekly, monthly, on_demand, event_driven",
+    "refresh_mode": "Valores permitidos: full, incremental, cdc, snapshot",
+    "retain_history": "true mantém histórico das cargas. false mantém apenas a versão mais recente",
+    "effective_date_column": "Coluna de data de vigência utilizada em históricos ou SCD. Exemplo: data_referencia",
+    "watermark_column": "Coluna utilizada para cargas incrementais. Exemplo: data_atualizacao"
+  },
+  "enabled": true,
+  "metadata": {
+    "dataset_name": "claro_notf_pcrf_sms",
+    "version": "1.0",
+    "description": "Notificações SMS enviadas pelo PCRF da Claro (consumo de franquia, ativação e renovação de planos)",
+    "owner": "",
+    "domain": "Telecom",
+    "source_system": "PCRF",
+    "criticality": "medium",
+    "scope": "process",
+    "privacy": {
+      "contains_pii": true,
+      "pii_columns": [
+        "MSISDN"
+      ],
+      "classification": "confidential"
+    }
+  },
+  "processing": {
+    "active": true,
+    "allow_reprocess": true
+  },
+  "ingestion": {
+    "update_frequency": "event_driven",
+    "refresh_mode": "incremental",
+    "retain_history": true,
+    "effective_date_column": "DATA_EVENTO",
+    "watermark_column": "DATA_EVENTO"
+  },
+  "raw": {
+    "enabled": true,
+    "file_format": "csv",
+    "schema_mode": "true",
+    "delimiter": "|",
+    "encoding": "utf-8",
+    "header": true,
+    "header_row": 1,
+    "incremental_key": "DATA_EVENTO",
+    "incremental_format": "yyyyMMddHHmmss",
+    "infer_schema": false,
+    "sheet_name": "",
+    "multiline": false,
+    "expected_columns": [
+      "DATA_EVENTO",
+      "PLANO",
+      "SMSC",
+      "MSISDN",
+      "FORNECEDOR",
+      "MENSAGEM"
+    ],
+    "required_columns": [
+      "DATA_EVENTO",
+      "PLANO",
+      "MSISDN",
+      "MENSAGEM"
+    ],
+    "partition_columns": [],
+    "load_strategy": "append",
+    "compression": "snappy",
+    "target_format": "parquet"
+  },
+  "trusted": {
+    "enabled": true,
+    "primary_key": [
+      "DATA_EVENTO",
+      "MSISDN",
+      "PLANO",
+      "SMSC",
+      "MENSAGEM"
+    ],
+    "partition_columns": [],
+    "deduplicate": false,
+    "deduplication_keys": [],
+    "remove_null_primary_key": true,
+    "trim_strings": true,
+    "empty_to_null": true,
+    "drop_fully_empty_rows": true,
+    "load_strategy": "append",
+    "compression": "snappy",
+    "schema_override": {
+      "DATA_EVENTO": "string",
+      "PLANO": "string",
+      "SMSC": "string",
+      "MSISDN": "string",
+      "FORNECEDOR": "string",
+      "MENSAGEM": "string"
+    }
+  },
+  "curated": {
+    "enabled": false,
+    "business_owner": "",
+    "partition_columns": [],
+    "load_strategy": "overwrite_partition",
+    "curated_outputs": []
+  },
+  "catalog": {
+    "create_glue_table": true,
+    "raw_database": "raw_db",
+    "trusted_database": "trusted_db",
+    "curated_database": "curated_db",
+    "bi_database": "niif-lakehouse"
+  },
+  "audit": {
+    "enabled": true,
+    "track_processed_files": true,
+    "track_etag": true,
+    "track_raw_signature": true,
+    "save_execution_log": true,
+    "save_rejected_records": true
+  }
+}
