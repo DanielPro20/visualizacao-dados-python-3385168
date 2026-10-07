@@ -59,7 +59,7 @@
       "pii_columns": [
         "MSISDN"
       ],
-      "classification": "confidential"
+      "classification": "restricted"
     }
   },
   "processing": {
