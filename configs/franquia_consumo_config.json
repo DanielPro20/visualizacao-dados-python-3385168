@@ -46,10 +46,10 @@
   },
   "enabled": true,
   "metadata": {
-    "dataset_name": "claro_notf_pcrf_sms",
+    "dataset_name": "franquia_consumo",
     "version": "1.0",
-    "description": "Notificações SMS disparadas pelo PCRF da Claro aos clientes pré-pagos (consumo de franquia de internet 50%/99%/100%, fim de pacote, ativação e renovação de planos Prezão). Uma linha por SMS enviado.",
-    "owner": "",
+    "description": "Notificações SMS do PCRF da Claro sobre consumo de franquia de dados dos clientes pré-pagos (alertas de 50%/99%/100%, fim de pacote, ativação e renovação do Prezão). Origem: arquivos CLARO_NOTF_PCRF_SMS_*.CSV, uma linha por SMS enviado.",
+    "owner": "A definir",
     "domain": "Telecom",
     "source_system": "PCRF",
     "criticality": "medium",
