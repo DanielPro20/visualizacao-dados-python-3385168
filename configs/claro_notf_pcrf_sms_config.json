@@ -41,13 +41,14 @@
     "retain_history": "true mantém histórico das cargas. false mantém apenas a versão mais recente",
     "effective_date_column": "Coluna de data de vigência utilizada em históricos ou SCD. Exemplo: data_referencia",
     "watermark_column": "Coluna utilizada para cargas incrementais. Exemplo: data_atualizacao",
-    "derived_partitions": "Colunas de partição derivadas de uma coluna existente. Para cada coluna: source_column (coluna de origem), source_format (formato da origem) e extract (parte extraída, ex: yyyy para ano, MM para mês)"
+    "derived_partitions": "Colunas de partição derivadas de uma coluna existente. Para cada coluna: source_column (coluna de origem), source_format (formato da origem) e extract (parte extraída, ex: yyyy para ano, MM para mês)",
+    "schedule": "Agendamento do processo em expressão cron. Utilizado quando a periodicidade não está coberta por update_frequency. Exemplo: */15 * * * * (a cada 15 minutos)"
   },
   "enabled": true,
   "metadata": {
     "dataset_name": "claro_notf_pcrf_sms",
     "version": "1.0",
-    "description": "Notificações SMS enviadas pelo PCRF da Claro (consumo de franquia, ativação e renovação de planos)",
+    "description": "Notificações SMS disparadas pelo PCRF da Claro aos clientes pré-pagos (consumo de franquia de internet 50%/99%/100%, fim de pacote, ativação e renovação de planos Prezão). Uma linha por SMS enviado.",
     "owner": "",
     "domain": "Telecom",
     "source_system": "PCRF",
@@ -63,17 +64,18 @@
   },
   "processing": {
     "active": true,
-    "allow_reprocess": true
+    "allow_reprocess": false
   },
   "ingestion": {
-    "update_frequency": "event_driven",
+    "update_frequency": "hourly",
+    "schedule": "*/15 * * * *",
     "refresh_mode": "incremental",
     "retain_history": true,
     "effective_date_column": "DATA_EVENTO",
     "watermark_column": "DATA_EVENTO"
   },
   "raw": {
-    "enabled": true,
+    "enabled": false,
     "file_format": "csv",
     "schema_mode": "true",
     "delimiter": "|",
@@ -99,25 +101,10 @@
       "MSISDN",
       "MENSAGEM"
     ],
-    "partition_columns": [
-      "ano_evento",
-      "mes_evento"
-    ],
-    "derived_partitions": {
-      "ano_evento": {
-        "source_column": "DATA_EVENTO",
-        "source_format": "yyyyMMddHHmmss",
-        "extract": "yyyy"
-      },
-      "mes_evento": {
-        "source_column": "DATA_EVENTO",
-        "source_format": "yyyyMMddHHmmss",
-        "extract": "MM"
-      }
-    },
+    "partition_columns": [],
     "load_strategy": "append",
-    "compression": "snappy",
-    "target_format": "parquet"
+    "compression": "none",
+    "target_format": "csv"
   },
   "trusted": {
     "enabled": true,
@@ -144,8 +131,14 @@
         "extract": "MM"
       }
     },
-    "deduplicate": false,
-    "deduplication_keys": [],
+    "deduplicate": true,
+    "deduplication_keys": [
+      "DATA_EVENTO",
+      "MSISDN",
+      "PLANO",
+      "SMSC",
+      "MENSAGEM"
+    ],
     "remove_null_primary_key": true,
     "trim_strings": true,
     "empty_to_null": true,
