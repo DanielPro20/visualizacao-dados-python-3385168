@@ -52,7 +52,7 @@
     "owner": "Daniel - Financeiro",
     "domain": "Financeiro",
     "source_system": "PCRF",
-    "criticality": "medium",
+    "criticality": "critical",
     "scope": "process",
     "privacy": {
       "contains_pii": true,
