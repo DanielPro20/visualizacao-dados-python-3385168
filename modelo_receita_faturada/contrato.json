@@ -1,0 +1,256 @@
+{
+  "versao": "1.0",
+  "descricao": "Carga da tabela fato de receita faturada corporativa a partir de BI_FP_RECEITA_FATURA_DET",
+  "mapeamento_csv": "mapeamento.csv",
+  "saida_sql": "modelo_execucao.sql",
+  "destino": {
+    "base": "PDW001",
+    "owner": "DWOPR",
+    "tabela": "TB_FATO_RECEITA_FATURADA"
+  },
+  "parametros": {
+    "P_MES_REF": {
+      "tipo": "VARCHAR2",
+      "formato": "YYYYMM",
+      "descricao": "Mês de faturamento a carregar (primeiro ao último dia do mês)"
+    }
+  },
+  "fonte_principal": {
+    "alias": "RFD",
+    "base": "PDW001",
+    "owner": "DWH",
+    "tabela": "BI_FP_RECEITA_FATURA_DET"
+  },
+  "joins": [
+    {
+      "id": 1,
+      "tipo": "LEFT",
+      "alias": "POS",
+      "base": "PDW001",
+      "owner": "DWH",
+      "tabela": "BI_FP_RECEITA_FATURADA_POS",
+      "agregacao": {
+        "chaves": [
+          "COD_ASSINANTE",
+          "DAT_FATURAMENTO",
+          "DW_NUM_CONTA_CLI",
+          "DW_CHARGE_CODE"
+        ],
+        "soma": [
+          "DUR_LIGACAO_DENTRO_FRANQUIA",
+          "DUR_LIGACAO_FORA_FRANQUIA",
+          "DUR_LIGACAO_REAL",
+          "DUR_LIGACAO_TARIFADA"
+        ]
+      },
+      "condicoes": [
+        {
+          "esquerda": "TO_CHAR(RFD.NUM_SEQ_ASS)",
+          "operador": "=",
+          "direita": "POS.COD_ASSINANTE"
+        },
+        {
+          "esquerda": "RFD.DAT_FATURA",
+          "operador": "=",
+          "direita": "POS.DAT_FATURAMENTO"
+        },
+        {
+          "esquerda": "RFD.DW_NUM_CONTA_CLI",
+          "operador": "=",
+          "direita": "POS.DW_NUM_CONTA_CLI"
+        },
+        {
+          "esquerda": "RFD.DW_CHARGE_CODE",
+          "operador": "=",
+          "direita": "POS.DW_CHARGE_CODE"
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "tipo": "LEFT",
+      "alias": "CC",
+      "base": "PDW001",
+      "owner": "DWH",
+      "tabela": "BI_DIM_CHARGE_CODE",
+      "condicoes": [
+        {
+          "esquerda": "RFD.DW_CHARGE_CODE",
+          "operador": "=",
+          "direita": "CC.DW_CHARGE_CODE"
+        }
+      ]
+    },
+    {
+      "id": 11,
+      "tipo": "LEFT",
+      "alias": "TR",
+      "base": "PDW001",
+      "owner": "DWH",
+      "tabela": "BI_DIM_TIPO_RECEITA",
+      "condicoes": [
+        {
+          "esquerda": "CC.COD_TIPO_RECEITA",
+          "operador": "=",
+          "direita": "TR.COD_TIPO_RECEITA"
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "tipo": "LEFT",
+      "alias": "OFE",
+      "base": "PDW001",
+      "owner": "DWH",
+      "tabela": "BI_DIM_OFERTA_POS",
+      "observacao": "Join separado do DW_OFERTA_DESCONTO",
+      "condicoes": [
+        {
+          "esquerda": "RFD.DW_OFERTA",
+          "operador": "=",
+          "direita": "OFE.DW_OFERTA"
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "tipo": "LEFT",
+      "alias": "OFD",
+      "base": "PDW001",
+      "owner": "DWH",
+      "tabela": "BI_DIM_OFERTA_POS",
+      "observacao": "Join separado do DW_OFERTA, traz somente a oferta de desconto",
+      "condicoes": [
+        {
+          "esquerda": "RFD.DW_OFERTA_DESCONTO",
+          "operador": "=",
+          "direita": "OFD.DW_OFERTA"
+        }
+      ]
+    },
+    {
+      "id": 13,
+      "tipo": "LEFT",
+      "alias": "BOG",
+      "base": "TAOL1_RPT",
+      "owner": "MTAAPPC",
+      "tabela": "BL_OFFER_GROUPS",
+      "condicoes": [
+        {
+          "esquerda": "OFE.COD_OFERTA",
+          "operador": "=",
+          "direita": "TO_CHAR(BOG.OFFER)"
+        },
+        {
+          "esquerda": "BOG.OFFER_GROUP",
+          "operador": "=",
+          "direita": "'PCT_SVA'"
+        }
+      ],
+      "dblink": "TAOL1_RPT"
+    },
+    {
+      "id": 5,
+      "tipo": "LEFT",
+      "alias": "CSP",
+      "base": "PDW001",
+      "owner": "DWH",
+      "tabela": "BI_DIM_CSP",
+      "condicoes": [
+        {
+          "esquerda": "RFD.DW_CSP",
+          "operador": "=",
+          "direita": "CSP.DW_CSP"
+        }
+      ]
+    },
+    {
+      "id": 6,
+      "tipo": "LEFT",
+      "alias": "AM",
+      "base": "PDW001",
+      "owner": "DWH",
+      "tabela": "BI_FP_ASS_APARELHO_MENSAL",
+      "observacao": "Último aparelho utilizado: maior DAT_REFERENCIA até a fatura; havendo mais de um, fica o primeiro",
+      "condicoes": [
+        {
+          "esquerda": "RFD.NUM_NTC",
+          "operador": "=",
+          "direita": "AM.NUM_NTC"
+        },
+        {
+          "esquerda": "RFD.DAT_FATURA",
+          "operador": ">=",
+          "direita": "AM.DAT_REFERENCIA"
+        },
+        {
+          "esquerda": "RFD.NUM_CLIENTE",
+          "operador": "=",
+          "direita": "AM.NUM_CLIENTE"
+        },
+        {
+          "esquerda": "AM.IND_ULT_APARELHO_UTILIZADO",
+          "operador": "=",
+          "direita": "'S'"
+        }
+      ],
+      "ultimo_registro": {
+        "particao": "RFD.ROWID",
+        "ordem": [
+          "AM.DAT_REFERENCIA DESC",
+          "AM.DAT_ULT_CHAMADA DESC NULLS LAST",
+          "AM.DW_TIPO_APARELHO"
+        ]
+      }
+    },
+    {
+      "id": 12,
+      "tipo": "LEFT",
+      "alias": "TA",
+      "base": "PDW001",
+      "owner": "DWH",
+      "tabela": "BI_DIM_TIPO_APARELHO",
+      "condicoes": [
+        {
+          "esquerda": "AM.DW_TIPO_APARELHO",
+          "operador": "=",
+          "direita": "TA.DW_TIPO_APARELHO"
+        }
+      ]
+    },
+    {
+      "id": 8,
+      "tipo": "LEFT",
+      "alias": "CLI",
+      "base": "PDW001",
+      "owner": "DWH",
+      "tabela": "BI_DIM_CLIENTE",
+      "condicoes": [
+        {
+          "esquerda": "RFD.DW_NUM_CLIENTE",
+          "operador": "=",
+          "direita": "CLI.DW_NUM_CLIENTE"
+        },
+        {
+          "esquerda": "CLI.IND_CORPORATIVO",
+          "operador": "=",
+          "direita": "'S'"
+        }
+      ]
+    }
+  ],
+  "filtros": [
+    "RFD.DAT_FATURA >= TO_DATE(:P_MES_REF, 'YYYYMM')",
+    "RFD.DAT_FATURA < ADD_MONTHS(TO_DATE(:P_MES_REF, 'YYYYMM'), 1)",
+    "RFD.IND_CORPORATIVO = 'S'"
+  ],
+  "pendencias": [
+    "Nome da tabela destino: o documento diz apenas 'TABELA FATO'; usei DWOPR.TB_FATO_RECEITA_FATURADA.",
+    "Campos VAL_ALIQUOTA_*, VAL_BASE_* e VAL_TARIFADO_* estão com 'regra de agregação a definir'; o modelo carrega o valor linha a linha, sem agregar.",
+    "DW_CSP aparece como CHAR(2) na BI_DIM_CSP (item 6) e NUMBER na BI_FP_RECEITA_FATURA_DET (item 27); o modelo usa o da fatura (NUMBER).",
+    "O join 5 (DW_CSP) não traz a condição; assumi igualdade.",
+    "O item 64 liga BL_OFFER_GROUPS a RECEITA_FATURADA_POS.COD_OFERTA, mas a regra 13 e o item 55 ligam via BI_DIM_OFERTA_POS.COD_OFERTA; o modelo segue a regra 13.",
+    "O filtro IND_CORPORATIVO = 'S' da BI_DIM_CLIENTE ficou na condição do LEFT JOIN para não descartar linhas da fatura; o filtro da extração é o da própria BI_FP_RECEITA_FATURA_DET.",
+    "BL_OFFER_GROUPS fica na base TAOL1_RPT; o modelo acessa via database link TAOL1_RPT (ajuste o nome do dblink se for outro)."
+  ]
+}
