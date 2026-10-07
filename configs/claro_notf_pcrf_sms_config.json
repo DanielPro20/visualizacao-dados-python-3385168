@@ -2,7 +2,7 @@
   "_documentation": {
     "dataset_name": "Nome lógico do dataset. Exemplo: sap_provisoes",
     "version": "Versão da configuração. Exemplo: 1.0",
-    "criticality": "Valores permitidos: low, medium, high, critical",
+    "criticality": "Valores permitidos: low, medium, high, critical. low = falha sem impacto relevante, pode ser corrigida em dias (bases de apoio, testes, análises pontuais); medium = afeta análises e relatórios do dia a dia, tolera atraso de algumas horas (indicadores operacionais internos, dashboards de acompanhamento); high = afeta decisões importantes, metas, fechamentos ou outras áreas consumidoras, deve ser corrigida no mesmo dia (provisões, receita, faturamento); critical = impacta operação, cliente ou obrigação regulatória/legal, exige ação imediata (dados para Anatel, cobrança, compliance, fraude)",
     "classification": "Valores permitidos: public, internal, confidential, restricted",
     "contains_pii": "true quando existir dado pessoal (LGPD)",
     "pii_columns": "Informar colunas que possuem dados pessoais. Exemplo: cpf, email, telefone. Deixar vazio quando contains_pii=false",
