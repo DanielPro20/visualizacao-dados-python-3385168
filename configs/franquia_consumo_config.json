@@ -50,7 +50,7 @@
     "version": "1.0",
     "description": "Notificações SMS do PCRF da Claro sobre consumo de franquia de dados dos clientes pré-pagos (alertas de 50%/99%/100%, fim de pacote, ativação e renovação do Prezão). Origem: arquivos CLARO_NOTF_PCRF_SMS_*.CSV, uma linha por SMS enviado.",
     "owner": "Daniel - Financeiro",
-    "domain": "Telecom",
+    "domain": "Financeiro",
     "source_system": "PCRF",
     "criticality": "medium",
     "scope": "process",
@@ -156,7 +156,7 @@
   },
   "curated": {
     "enabled": false,
-    "business_owner": "",
+    "business_owner": "Daniel - Financeiro",
     "partition_columns": [],
     "load_strategy": "overwrite_partition",
     "curated_outputs": []
