@@ -1,0 +1,145 @@
+{
+  "enabled": true,
+  "metadata": {
+    "dataset_name": "in_sumexec_resumo_soe",
+    "version": "1.0",
+    "description": "Resumo executivo mensal (SOE) de acessos: ativações, desativações, ajustes, base, net adds e migrações por categoria, estrutura e grupo, com valores do mês anterior. Origem: arquivo INRG.IN_SUMEXEC_RESUMO_SOE.csv, delimitado por '|'.",
+    "owner": "Daniel - Financeiro",
+    "domain": "Financeiro",
+    "source_system": "BI Claro (INRG)",
+    "criticality": "critical",
+    "scope": "process",
+    "privacy": {
+      "contains_pii": false,
+      "pii_columns": [],
+      "classification": "internal"
+    }
+  },
+  "processing": {
+    "active": true,
+    "allow_reprocess": false
+  },
+  "ingestion": {
+    "update_frequency": "monthly",
+    "schedule": "",
+    "refresh_mode": "incremental",
+    "retain_history": true,
+    "effective_date_column": "DT_ANO_MES",
+    "watermark_column": "ANO_MES"
+  },
+  "raw": {
+    "enabled": true,
+    "file_format": "csv",
+    "schema_mode": "true",
+    "delimiter": "|",
+    "encoding": "ISO-8859-1",
+    "header": true,
+    "header_row": 1,
+    "incremental_key": "ANO_MES",
+    "incremental_format": "yyyyMM",
+    "infer_schema": false,
+    "sheet_name": "",
+    "multiline": false,
+    "expected_columns": [
+      "ANO_MES",
+      "CATEGORIA",
+      "ESTRUTURA",
+      "QTD_ATIV",
+      "QTD_DESATIV",
+      "QTD_AJUSTE",
+      "QTD_BASE",
+      "GRUPO",
+      "BASE_CALCULADA",
+      "AJUSTE",
+      "QTD_BASE_MES_ANT",
+      "QTD_ATIV_MES_ANT",
+      "QTD_DESATIV_MES_ANT",
+      "NET_ADDS",
+      "NET_ADDS_MES_ANT",
+      "DT_ANO_MES",
+      "ATIV_MIGRACOES",
+      "DESATIV_MIGRACOES",
+      "NET_ADDS_MIGRACOES"
+    ],
+    "required_columns": [
+      "ANO_MES",
+      "CATEGORIA",
+      "ESTRUTURA",
+      "GRUPO",
+      "DT_ANO_MES"
+    ],
+    "load_strategy": "overwrite",
+    "compression": "snappy",
+    "target_format": "parquet"
+  },
+  "trusted": {
+    "enabled": true,
+    "primary_key": [
+      "ANO_MES",
+      "CATEGORIA",
+      "ESTRUTURA",
+      "GRUPO"
+    ],
+    "partition_columns": [
+      "ANO_MES"
+    ],
+    "deduplicate": true,
+    "deduplication_keys": [
+      "ANO_MES",
+      "CATEGORIA",
+      "ESTRUTURA",
+      "GRUPO"
+    ],
+    "remove_null_primary_key": false,
+    "trim_strings": true,
+    "empty_to_null": true,
+    "drop_fully_empty_rows": true,
+    "load_strategy": "overwrite",
+    "compression": "snappy",
+    "schema_override": {
+      "ANO_MES": "string",
+      "CATEGORIA": "string",
+      "ESTRUTURA": "string",
+      "QTD_ATIV": "double",
+      "QTD_DESATIV": "double",
+      "QTD_AJUSTE": "double",
+      "QTD_BASE": "double",
+      "GRUPO": "string",
+      "BASE_CALCULADA": "double",
+      "AJUSTE": "double",
+      "QTD_BASE_MES_ANT": "double",
+      "QTD_ATIV_MES_ANT": "double",
+      "QTD_DESATIV_MES_ANT": "double",
+      "NET_ADDS": "double",
+      "NET_ADDS_MES_ANT": "double",
+      "DT_ANO_MES": "timestamp",
+      "ATIV_MIGRACOES": "double",
+      "DESATIV_MIGRACOES": "double",
+      "NET_ADDS_MIGRACOES": "double"
+    }
+  },
+  "curated": {
+    "enabled": true,
+    "business_owner": "",
+    "partition_columns": [
+      "ANO_MES"
+    ],
+    "load_strategy": "overwrite",
+    "curated_outputs": []
+  },
+  "catalog": {
+    "create_glue_table": true,
+    "raw_database": "raw_db",
+    "trusted_database": "trusted_db",
+    "curated_database": "curated_db",
+    "bi_database": "niif-lakehouse"
+  },
+  "audit": {
+    "enabled": true,
+    "track_processed_files": true,
+    "track_etag": true,
+    "track_raw_signature": true,
+    "save_execution_log": true,
+    "save_rejected_records": true
+  }
+}

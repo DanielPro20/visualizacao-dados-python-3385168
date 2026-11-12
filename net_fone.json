@@ -1,0 +1,181 @@
+{
+  "enabled": true,
+  "metadata": {
+    "dataset_name": "fs_net_fone_mes",
+    "version": "1.0",
+    "description": "Fato mensal de NET Fone (marca NET): quantidade (QTDE) de base de conectados e instalações por mês, município (IBGE), regional, cluster, linha de negócio, portfólio (NM_DEPARA_BOOK), tecnologia e flag GPON. Origem: arquivo INN.FS_NET_FONE_MES.csv, delimitado por '|'.",
+    "owner": "Daniel - Financeiro",
+    "domain": "Financeiro",
+    "source_system": "BI Claro (INN)",
+    "criticality": "critical",
+    "scope": "process",
+    "privacy": {
+      "contains_pii": false,
+      "pii_columns": [],
+      "classification": "internal"
+    }
+  },
+  "processing": {
+    "active": true,
+    "allow_reprocess": false
+  },
+  "ingestion": {
+    "update_frequency": "monthly",
+    "schedule": "",
+    "refresh_mode": "incremental",
+    "retain_history": true,
+    "effective_date_column": "SK_DATA",
+    "watermark_column": "DATA_BASE"
+  },
+  "raw": {
+    "enabled": true,
+    "file_format": "csv",
+    "schema_mode": "true",
+    "delimiter": "|",
+    "encoding": "ISO-8859-1",
+    "header": true,
+    "header_row": 1,
+    "incremental_key": "DATA_BASE",
+    "incremental_format": "yyyyMM",
+    "infer_schema": false,
+    "sheet_name": "",
+    "multiline": false,
+    "expected_columns": [
+      "SK_DATA",
+      "DATA_BASE",
+      "NM_MARCA_BI",
+      "NM_SUB_MARCA_BI",
+      "NM_INDICADOR_NEGOCIO_BI",
+      "NM_TIPO_PRODUTO_MARCA_BI",
+      "SK_MUNICIPIO",
+      "NM_REGIONAL_BI",
+      "NM_GRUPO_REGIONAL_BI",
+      "NM_CLUSTER_BI",
+      "NM_SUBCLUSTER_BI",
+      "NM_MUNICIPIO_BI",
+      "SG_ESTADO",
+      "DDD",
+      "NM_REGIONAL_CMV_BI",
+      "FLAG_PME",
+      "NM_LINHA_NEGOCIO_BI",
+      "NM_DEPARA_BOOK",
+      "TECNOLOGIA",
+      "FC_GPON",
+      "QTDE"
+    ],
+    "required_columns": [
+      "SK_DATA",
+      "DATA_BASE",
+      "SK_MUNICIPIO",
+      "NM_DEPARA_BOOK",
+      "QTDE"
+    ],
+    "load_strategy": "overwrite",
+    "compression": "snappy",
+    "target_format": "parquet"
+  },
+  "trusted": {
+    "enabled": true,
+    "primary_key": [
+      "SK_DATA",
+      "DATA_BASE",
+      "NM_MARCA_BI",
+      "NM_SUB_MARCA_BI",
+      "NM_INDICADOR_NEGOCIO_BI",
+      "NM_TIPO_PRODUTO_MARCA_BI",
+      "SK_MUNICIPIO",
+      "NM_REGIONAL_BI",
+      "NM_GRUPO_REGIONAL_BI",
+      "NM_CLUSTER_BI",
+      "NM_SUBCLUSTER_BI",
+      "NM_MUNICIPIO_BI",
+      "SG_ESTADO",
+      "DDD",
+      "NM_REGIONAL_CMV_BI",
+      "FLAG_PME",
+      "NM_LINHA_NEGOCIO_BI",
+      "NM_DEPARA_BOOK",
+      "TECNOLOGIA",
+      "FC_GPON"
+    ],
+    "partition_columns": [
+      "DATA_BASE"
+    ],
+    "deduplicate": true,
+    "deduplication_keys": [
+      "SK_DATA",
+      "DATA_BASE",
+      "NM_MARCA_BI",
+      "NM_SUB_MARCA_BI",
+      "NM_INDICADOR_NEGOCIO_BI",
+      "NM_TIPO_PRODUTO_MARCA_BI",
+      "SK_MUNICIPIO",
+      "NM_REGIONAL_BI",
+      "NM_GRUPO_REGIONAL_BI",
+      "NM_CLUSTER_BI",
+      "NM_SUBCLUSTER_BI",
+      "NM_MUNICIPIO_BI",
+      "SG_ESTADO",
+      "DDD",
+      "NM_REGIONAL_CMV_BI",
+      "FLAG_PME",
+      "NM_LINHA_NEGOCIO_BI",
+      "NM_DEPARA_BOOK",
+      "TECNOLOGIA",
+      "FC_GPON"
+    ],
+    "remove_null_primary_key": false,
+    "trim_strings": true,
+    "empty_to_null": true,
+    "drop_fully_empty_rows": true,
+    "load_strategy": "overwrite",
+    "compression": "snappy",
+    "schema_override": {
+      "SK_DATA": "int",
+      "DATA_BASE": "int",
+      "NM_MARCA_BI": "string",
+      "NM_SUB_MARCA_BI": "string",
+      "NM_INDICADOR_NEGOCIO_BI": "string",
+      "NM_TIPO_PRODUTO_MARCA_BI": "string",
+      "SK_MUNICIPIO": "bigint",
+      "NM_REGIONAL_BI": "string",
+      "NM_GRUPO_REGIONAL_BI": "string",
+      "NM_CLUSTER_BI": "string",
+      "NM_SUBCLUSTER_BI": "string",
+      "NM_MUNICIPIO_BI": "string",
+      "SG_ESTADO": "string",
+      "DDD": "int",
+      "NM_REGIONAL_CMV_BI": "string",
+      "FLAG_PME": "string",
+      "NM_LINHA_NEGOCIO_BI": "string",
+      "NM_DEPARA_BOOK": "string",
+      "TECNOLOGIA": "string",
+      "FC_GPON": "string",
+      "QTDE": "bigint"
+    }
+  },
+  "curated": {
+    "enabled": true,
+    "business_owner": "",
+    "partition_columns": [
+      "DATA_BASE"
+    ],
+    "load_strategy": "overwrite",
+    "curated_outputs": []
+  },
+  "catalog": {
+    "create_glue_table": true,
+    "raw_database": "raw_db",
+    "trusted_database": "trusted_db",
+    "curated_database": "curated_db",
+    "bi_database": "niif-lakehouse"
+  },
+  "audit": {
+    "enabled": true,
+    "track_processed_files": true,
+    "track_etag": true,
+    "track_raw_signature": true,
+    "save_execution_log": true,
+    "save_rejected_records": true
+  }
+}
