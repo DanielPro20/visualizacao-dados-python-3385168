@@ -8,7 +8,24 @@ Versão PySpark da query SQL que consolida, por serviço/produto Anatel:
     2. Base e Instalações CLARO FONE (PUCs Local / Outros Serviços)
     3. Base e Ativações de troncos E1 empresariais (dsac_sumexec)
 
-Tabelas de origem: dsac_net_fone, dsac_claro_fone e dsac_sumexec.
+Tabelas de origem (AWS Athena, database/owner "trusted_db"):
+    trusted_db.dsac_net_fone, trusted_db.dsac_claro_fone e trusted_db.dsac_sumexec.
+
+Como o Spark lê as tabelas do Athena
+------------------------------------
+O Athena não armazena dados: as tabelas ficam registradas no AWS Glue Data Catalog
+e os arquivos no S3. O Spark usa o MESMO Glue Data Catalog como metastore e lê os
+arquivos direto do S3 (sem passar pelo motor do Athena, sem custo de scan do Athena).
+
+    - AWS Glue Job (Spark): marque "Use Glue Data Catalog as the Hive metastore"
+      (parâmetro --enable-glue-datacatalog).
+    - Amazon EMR: classificação "spark-hive-site" com
+      hive.metastore.client.factory.class =
+      com.amazonaws.glue.catalog.metastore.AWSGlueDataCatalogHiveClientFactory
+      (o script também define essa configuração na SparkSession).
+    - A role IAM do job precisa de: glue:GetDatabase/GetTable/GetPartitions no
+      trusted_db e s3:GetObject/ListBucket nos buckets das tabelas (e, se gravar,
+      glue:CreateTable/UpdateTable + s3:PutObject/DeleteObject no destino).
 
 A lógica foi mantida 1:1 com o SQL original, inclusive:
     - a tabela dsac_claro_fone é contabilizada nos blocos 1 E 2 (como no SQL);
@@ -16,12 +33,13 @@ A lógica foi mantida 1:1 com o SQL original, inclusive:
 
 Execução (exemplos):
 
-    spark-submit dsac_telefonia_fixa.py --ano 2025 \
-        --database trusted_db \
-        --saida-tabela meu_schema.dsac_telefonia_fixa_2025
+    # Apenas exibe o resultado
+    spark-submit dsac_telefonia_fixa.py --ano 2025
 
+    # Grava no S3 e registra a tabela no Glue Catalog (consultável no Athena)
     spark-submit dsac_telefonia_fixa.py --ano 2025 \
-        --saida-path s3a://bucket/dsac/telefonia_fixa --formato parquet
+        --saida-tabela refined_db.dsac_telefonia_fixa \
+        --saida-s3 s3://meu-bucket/refined/dsac_telefonia_fixa/
 
 Códigos de saída: 0 = sucesso | 1 = erro de execução | 2 = erro de validação dos dados.
 """
@@ -262,52 +280,95 @@ def calcular_dsac(df_net: DataFrame, df_claro: DataFrame, df_sumexec: DataFrame,
 # ---------------------------------------------------------------------------
 # Infraestrutura (Spark, leitura, escrita, CLI)
 # ---------------------------------------------------------------------------
+# Database (owner) das tabelas de origem no Athena / Glue Data Catalog
+DATABASE_ORIGEM = "trusted_db"
+TABELAS_ORIGEM = {
+    "net_fone": "dsac_net_fone",
+    "claro_fone": "dsac_claro_fone",
+    "sumexec": "dsac_sumexec",
+}
+
+
 def criar_spark(app_name: str) -> SparkSession:
-    """SparkSession com Hive habilitado (para ler/gravar tabelas do metastore)."""
+    """SparkSession usando o AWS Glue Data Catalog (o catálogo do Athena) como metastore.
+
+    - hive.metastore.client.factory.class: faz o Spark enxergar os databases/tabelas
+      do Athena (Glue). Em Glue Jobs isso já vem com --enable-glue-datacatalog; em
+      EMR pode vir da classificação spark-hive-site. Definir aqui é inofensivo.
+    - partitionOverwriteMode=dynamic: no overwrite de tabela particionada, substitui
+      só as partições gravadas (não apaga o histórico de outros anos).
+    """
     return (
         SparkSession.builder.appName(app_name)
+        .config("spark.hadoop.hive.metastore.client.factory.class",
+                "com.amazonaws.glue.catalog.metastore.AWSGlueDataCatalogHiveClientFactory")
+        .config("spark.sql.catalogImplementation", "hive")
         .config("spark.sql.adaptive.enabled", "true")   # AQE ajusta partições de shuffle
         .config("spark.sql.session.timeZone", "UTC")     # evita diferenças entre ambientes
+        .config("spark.sql.sources.partitionOverwriteMode", "dynamic")
         .enableHiveSupport()
         .getOrCreate()
     )
 
 
-def _nome_tabela(database: Optional[str], tabela: str) -> str:
-    return f"{database}.{tabela}" if database else tabela
+def ler_tabela_athena(spark: SparkSession, database: str, tabela: str) -> DataFrame:
+    """Lê uma tabela do Athena (Glue Data Catalog), validando antes se ela existe.
 
-
-def gravar(df: DataFrame, tabela: Optional[str], path: Optional[str], formato: str,
-           modo: str) -> None:
-    """Grava o resultado em tabela do metastore e/ou em arquivos.
-
-    O resultado tem poucas linhas, por isso coalesce(1) gera um único arquivo.
+    O nome é usado em minúsculas, pois o Athena/Glue armazena nomes em lowercase.
     """
-    df = df.coalesce(1)
+    nome = f"{database}.{tabela}".lower()
+    if not spark.catalog.tableExists(nome):
+        raise ErroValidacao(
+            f"Tabela '{nome}' não encontrada no Glue Data Catalog. Verifique se o job usa o "
+            "Glue como metastore e se a role IAM tem permissão no database."
+        )
+    log.info("Lendo %s", nome)
+    return spark.table(nome)
+
+
+def gravar(df: DataFrame, tabela: Optional[str], caminho_s3: Optional[str], ano: str,
+           modo: str) -> None:
+    """Grava o resultado em Parquet no S3 e (opcionalmente) registra no Glue Catalog.
+
+    - Parquet + tabela externa (com path no S3) = consultável diretamente no Athena.
+    - A coluna 'ano' é adicionada e usada como partição, permitindo reprocessar um ano
+      sem apagar os demais.
+    - O resultado tem poucas linhas, por isso coalesce(1) gera um único arquivo.
+    """
+    df = df.withColumn("ano", F.lit(ano)).coalesce(1)
+    escritor = df.write.mode(modo).format("parquet").partitionBy("ano")
+
     if tabela:
-        log.info("Gravando tabela %s (modo=%s)", tabela, modo)
-        df.write.mode(modo).format("parquet").saveAsTable(tabela)
-    if path:
-        log.info("Gravando %s em %s (modo=%s)", formato, path, modo)
-        escritor = df.write.mode(modo).format(formato)
-        if formato == "csv":
-            escritor = escritor.option("header", "true").option("encoding", "UTF-8")
-        escritor.save(path)
+        if not caminho_s3:
+            raise ErroValidacao("--saida-tabela exige --saida-s3 (tabela externa para o Athena)")
+        log.info("Gravando tabela %s em %s (modo=%s)", tabela, caminho_s3, modo)
+        spark = df.sparkSession
+        if modo == "overwrite" and spark.catalog.tableExists(tabela):
+            # Tabela já existe: insertInto respeita o overwrite dinâmico por partição
+            # (só o ano processado é substituído). insertInto é posicional, então
+            # alinhamos as colunas na ordem da tabela de destino.
+            colunas_destino = spark.table(tabela).columns
+            df.select(*colunas_destino).write.insertInto(tabela, overwrite=True)
+        else:
+            escritor.option("path", caminho_s3).saveAsTable(tabela)
+    elif caminho_s3:
+        log.info("Gravando parquet em %s (modo=%s)", caminho_s3, modo)
+        escritor.save(caminho_s3)
 
 
 def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(description="DSAC - Assinatura, Habilitação e Troncos da Telefonia Fixa")
     p.add_argument("--ano", default="2025", help="Ano de referência (default: 2025)")
-    p.add_argument("--database", default="trusted_db", help="Database de origem (camada trusted)")
-    p.add_argument("--tabela-net-fone", default="dsac_net_fone")
-    p.add_argument("--tabela-claro-fone", default="dsac_claro_fone")
-    p.add_argument("--tabela-sumexec", default="dsac_sumexec")
-    p.add_argument("--saida-tabela", default=None, help="Tabela de destino (ex.: schema.tabela)")
-    p.add_argument("--saida-path", default=None, help="Diretório de destino (s3a://, hdfs://, local...)")
-    p.add_argument("--formato", default="parquet", choices=["parquet", "csv", "delta", "orc"])
+    p.add_argument("--database", default=DATABASE_ORIGEM,
+                   help=f"Database (owner) das tabelas no Athena (default: {DATABASE_ORIGEM})")
+    p.add_argument("--saida-tabela", default=None,
+                   help="Tabela de destino no Glue/Athena (ex.: refined_db.dsac_telefonia_fixa)")
+    p.add_argument("--saida-s3", default=None,
+                   help="Caminho S3 de destino (ex.: s3://bucket/refined/dsac_telefonia_fixa/)")
     p.add_argument("--modo", default="overwrite", choices=["overwrite", "append", "errorifexists"])
     p.add_argument("--mostrar", action="store_true", help="Exibe o resultado no log (debug)")
-    args = p.parse_args(argv)
+    # parse_known_args: ignora argumentos extras que o AWS Glue injeta (--JOB_NAME etc.)
+    args, _ = p.parse_known_args(argv)
 
     if not (len(args.ano) == 4 and args.ano.isdigit()):
         p.error("--ano deve ter 4 dígitos, ex.: 2025")
@@ -322,9 +383,10 @@ def main(argv: Optional[list[str]] = None) -> int:
 
     try:
         log.info("Iniciando DSAC telefonia fixa - ano %s", args.ano)
-        df_net = spark.table(_nome_tabela(args.database, args.tabela_net_fone))
-        df_claro = spark.table(_nome_tabela(args.database, args.tabela_claro_fone))
-        df_sumexec = spark.table(_nome_tabela(args.database, args.tabela_sumexec))
+        # Tabelas do Athena (database/owner trusted_db) via Glue Data Catalog
+        df_net = ler_tabela_athena(spark, args.database, TABELAS_ORIGEM["net_fone"])
+        df_claro = ler_tabela_athena(spark, args.database, TABELAS_ORIGEM["claro_fone"])
+        df_sumexec = ler_tabela_athena(spark, args.database, TABELAS_ORIGEM["sumexec"])
 
         # cache: o resultado é pequeno e é usado para validação, log e escrita
         resultado = calcular_dsac(df_net, df_claro, df_sumexec, args.ano).cache()
@@ -338,11 +400,11 @@ def main(argv: Optional[list[str]] = None) -> int:
             log.warning("%d linha(s) classificadas como 'ND' (sem de/para Anatel)", nd)
         log.info("Resultado com %d linha(s)", qtd)
 
-        if args.mostrar or not (args.saida_tabela or args.saida_path):
+        if args.mostrar or not (args.saida_tabela or args.saida_s3):
             resultado.show(truncate=False)
 
-        if args.saida_tabela or args.saida_path:
-            gravar(resultado, args.saida_tabela, args.saida_path, args.formato, args.modo)
+        if args.saida_tabela or args.saida_s3:
+            gravar(resultado, args.saida_tabela, args.saida_s3, args.ano, args.modo)
 
         log.info("Processo finalizado com sucesso")
         return 0
