@@ -32,8 +32,21 @@ A lógica foi mantida 1:1 com o SQL original, inclusive:
     - no bloco 3 o arredondamento é feito por mês (ano_mes) antes da soma anual.
 
 Execução: este arquivo único roda tanto via spark-submit / AWS Glue Job quanto
-colado inteiro em UMA célula de Jupyter (o ano e os destinos podem ser alterados
+colado inteiro em UMA célula de notebook (o ano e os destinos podem ser alterados
 nos defaults de parse_args).
+
+AWS Glue Studio notebook (interactive session)
+----------------------------------------------
+    - Cole o arquivo inteiro numa célula e execute. A SparkSession da sessão Glue é
+      reaproveitada (não é recriada nem encerrada).
+    - Se aparecer "Tabela ... não encontrada", reinicie a sessão com a célula abaixo
+      ANTES de qualquer código (magics só valem antes de a sessão iniciar):
+
+          %%configure
+          {"--enable-glue-datacatalog": "true"}
+
+    - A role IAM da sessão precisa das permissões listadas acima e, se o trusted_db estiver
+      sob AWS Lake Formation, de permissão SELECT/DESCRIBE nas 3 tabelas.
 
 Exemplos:
 
@@ -48,12 +61,11 @@ Exemplos:
 Códigos de saída: 0 = sucesso | 1 = erro de execução | 2 = erro de validação dos dados.
 """
 
-from __future__ import annotations
 
 import argparse
 import logging
 import sys
-from typing import Iterable, Optional
+from typing import Iterable, List, Optional, Tuple
 
 from pyspark.sql import Column, DataFrame, SparkSession
 from pyspark.sql import functions as F
@@ -105,7 +117,7 @@ def _filtro_ano(coluna: str, ano: str) -> Column:
     return F.col(coluna).cast("string").startswith(ano)
 
 
-def _mapear(regras: Iterable[tuple[Column, str]], padrao: str = NAO_DEFINIDO) -> Column:
+def _mapear(regras: Iterable[Tuple[Column, str]], padrao: str = NAO_DEFINIDO) -> Column:
     """Monta um CASE WHEN ... THEN ... ELSE padrao END a partir de uma lista de regras."""
     expr = None
     for condicao, valor in regras:
@@ -113,7 +125,7 @@ def _mapear(regras: Iterable[tuple[Column, str]], padrao: str = NAO_DEFINIDO) ->
     return expr.otherwise(padrao)
 
 
-def validar_colunas(df: DataFrame, obrigatorias: list[str], nome: str) -> None:
+def validar_colunas(df: DataFrame, obrigatorias: List[str], nome: str) -> None:
     """Falha cedo (antes de qualquer processamento) se faltar coluna na origem."""
     faltando = [c for c in obrigatorias if c not in df.columns]
     if faltando:
@@ -315,13 +327,23 @@ def criar_spark(app_name: str) -> SparkSession:
     )
 
 
+def tabela_existe(spark: SparkSession, nome_completo: str) -> bool:
+    """Verifica se database.tabela existe no catálogo.
+
+    Usa SHOW TABLES em vez de spark.catalog.tableExists porque este último não
+    existe no PySpark do Glue 3.0 (Spark 3.1).
+    """
+    database, tabela = nome_completo.lower().split(".", 1)
+    return spark.sql(f"SHOW TABLES IN {database} LIKE '{tabela}'").limit(1).count() > 0
+
+
 def ler_tabela_athena(spark: SparkSession, database: str, tabela: str) -> DataFrame:
     """Lê uma tabela do Athena (Glue Data Catalog), validando antes se ela existe.
 
     O nome é usado em minúsculas, pois o Athena/Glue armazena nomes em lowercase.
     """
     nome = f"{database}.{tabela}".lower()
-    if not spark.catalog.tableExists(nome):
+    if not tabela_existe(spark, nome):
         raise ErroValidacao(
             f"Tabela '{nome}' não encontrada no Glue Data Catalog. Verifique se o job usa o "
             "Glue como metastore e se a role IAM tem permissão no database."
@@ -347,7 +369,7 @@ def gravar(df: DataFrame, tabela: Optional[str], caminho_s3: Optional[str], ano:
             raise ErroValidacao("--saida-tabela exige --saida-s3 (tabela externa para o Athena)")
         log.info("Gravando tabela %s em %s (modo=%s)", tabela, caminho_s3, modo)
         spark = df.sparkSession
-        if modo == "overwrite" and spark.catalog.tableExists(tabela):
+        if modo == "overwrite" and tabela_existe(spark, tabela):
             # Tabela já existe: insertInto respeita o overwrite dinâmico por partição
             # (só o ano processado é substituído). insertInto é posicional, então
             # alinhamos as colunas na ordem da tabela de destino.
@@ -360,7 +382,7 @@ def gravar(df: DataFrame, tabela: Optional[str], caminho_s3: Optional[str], ano:
         escritor.save(caminho_s3)
 
 
-def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
+def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(description="DSAC - Assinatura, Habilitação e Troncos da Telefonia Fixa")
     p.add_argument("--ano", default="2025", help="Ano de referência (default: 2025)")
     p.add_argument("--database", default=DATABASE_ORIGEM,
@@ -379,11 +401,23 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
     return args
 
 
-def main(argv: Optional[list[str]] = None) -> int:
-    # force=True: Glue/EMR/Jupyter já configuram o logging e, sem isso, nada aparece.
-    # stream=stdout: o log sai na saída da célula / no CloudWatch (output).
-    logging.basicConfig(level=logging.INFO, stream=sys.stdout, force=True,
-                        format="%(asctime)s %(levelname)s %(name)s - %(message)s")
+def configurar_log() -> None:
+    """Log no stdout (saída da célula do notebook / CloudWatch do Glue Job).
+
+    O Glue já configura o logging raiz, por isso o handler é anexado direto no
+    logger do job (basicConfig seria ignorado). Evita handler duplicado ao
+    reexecutar a célula.
+    """
+    log.setLevel(logging.INFO)
+    log.propagate = False
+    if not log.handlers:
+        handler = logging.StreamHandler(sys.stdout)
+        handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s - %(message)s"))
+        log.addHandler(handler)
+
+
+def main(argv: Optional[List[str]] = None) -> int:
+    configurar_log()
     args = parse_args(argv)
     spark = criar_spark(f"dsac_telefonia_fixa_{args.ano}")
 
@@ -426,16 +460,19 @@ def main(argv: Optional[list[str]] = None) -> int:
             spark.stop()
 
 
-# Detecta notebook: ao rodar como arquivo (spark-submit / Glue Job) o Python define
-# __file__; colado numa célula (Jupyter, Glue Studio, EMR Studio, SageMaker - inclusive
-# sessões remotas via Livy/sparkmagic, onde não existe ipykernel) __file__ não existe.
-EM_NOTEBOOK = "__file__" not in globals()
+# Detecta se é JOB: o Glue Job sempre recebe --JOB_NAME e o spark-submit recebe o
+# caminho deste arquivo em sys.argv[0]. Qualquer outro caso (Glue Studio notebook,
+# Jupyter, EMR Studio) é tratado como notebook: nada de sys.exit nem spark.stop(),
+# que derrubariam a sessão interativa.
+_argv = sys.argv or [""]
+EM_JOB = "--JOB_NAME" in _argv or _argv[0].endswith("dsac_telefonia_fixa.py")
+EM_NOTEBOOK = not EM_JOB
 
-if __name__ == "__main__":
-    if EM_NOTEBOOK:
-        # Notebook: executa sem argumentos, sem sys.exit e sem parar a sessão Spark
-        codigo_saida = main([])
-        print(f"Código de saída: {codigo_saida} (0 = sucesso | 1 = erro de execução | 2 = erro de validação)")
-    else:
-        # spark-submit / Glue Job: código de saída sinaliza sucesso ou falha ao orquestrador
+if EM_JOB:
+    # spark-submit / Glue Job: código de saída sinaliza sucesso ou falha ao orquestrador
+    if __name__ == "__main__":
         sys.exit(main())
+else:
+    # Notebook: executa com os defaults de parse_args (edite-os para mudar ano/destino)
+    codigo_saida = main([])
+    print(f"Código de saída: {codigo_saida} (0 = sucesso | 1 = erro de execução | 2 = erro de validação)")
