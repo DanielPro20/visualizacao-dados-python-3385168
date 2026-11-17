@@ -19,10 +19,16 @@
 #   Obs.: como no SQL, dsac_claro_fone entra nos blocos 1 e 2.
 #
 # As linhas com % no topo configuram a sessão (só valem antes de ela iniciar).
-# Se aparecer "Tabela não encontrada", pare a sessão (%stop_session) e rode
-# numa célula separada, antes de tudo:
-#     %%configure
-#     {"--enable-glue-datacatalog": "true"}
+#
+# PRÉ-REQUISITO IAM (role Glue_Service) - sem isso a sessão não inicia
+# ("not authorized to perform: iam:PassRole"). Política inline na role:
+#   {"Version": "2012-10-17", "Statement": [{
+#     "Effect": "Allow", "Action": "iam:PassRole",
+#     "Resource": "arn:aws:iam::591667019086:role/Glue_Service",
+#     "Condition": {"StringLike": {"iam:PassedToService": "glue.amazonaws.com"}}}]}
+# A role também precisa ler o trusted_db (glue:GetDatabase/GetTable/GetPartitions,
+# s3:GetObject/ListBucket nos buckets das tabelas e, se houver Lake Formation,
+# SELECT nas 3 tabelas).
 # =============================================================================
 
 from awsglue.context import GlueContext
