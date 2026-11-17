@@ -1,35 +1,34 @@
 # =============================================================================
 # DSAC - Dados de Assinatura, Habilitação e Troncos da Telefonia Fixa
 # -----------------------------------------------------------------------------
-# Python (sem Spark) usando AWS SDK for pandas (awswrangler).
+# Python puro com boto3 (já vem instalado no AWS Glue - não precisa de pip).
 #
 #   Origem : Athena, database trusted_db
 #            (dsac_net_fone, dsac_claro_fone, dsac_sumexec)
 #   Destino: Athena, database curated_db, tabela dsac_p1_sub2
 #            (Parquet no S3, particionado por ano)
 #
-# Como funciona:
-#   1. A query SQL original roda no próprio Athena (o processamento pesado fica lá).
-#   2. O resultado (poucas linhas) volta como DataFrame pandas.
-#   3. É gravado em Parquet no S3 e registrado no Glue Catalog como
-#      curated_db.dsac_p1_sub2. Reprocessar um ano substitui só aquele ano.
+# Todo o processamento roda no próprio Athena:
+#   1. CREATE EXTERNAL TABLE IF NOT EXISTS curated_db.dsac_p1_sub2
+#   2. Remove o ano que será reprocessado (partição + arquivos no S3)
+#   3. INSERT INTO curated_db.dsac_p1_sub2 SELECT ... (query original)
+#   4. Exibe o resultado gravado
 #
-# Onde rodar: Jupyter (cole numa célula) ou como script (python dsac_telefonia_fixa.py).
-#   pip install awswrangler
-#   Credenciais AWS: aws configure / variáveis de ambiente / role da máquina.
-#   Em AWS Glue Python Shell: job parameter --additional-python-modules awswrangler
+# Funciona em: Glue Python Shell job, Glue Spark job, Jupyter, script local.
 #
-# Permissões necessárias (usuário ou role que executa):
+# Permissões necessárias (role do job):
 #   - athena:StartQueryExecution / GetQueryExecution / GetQueryResults
 #   - glue:GetDatabase / GetTable / GetPartitions (trusted_db e curated_db)
-#   - glue:CreateTable / UpdateTable / BatchCreatePartition (curated_db)
+#   - glue:CreateTable / BatchCreatePartition / BatchDeletePartition (curated_db)
 #   - s3:GetObject / ListBucket nos buckets do trusted_db
-#   - s3:PutObject / DeleteObject / ListBucket no bucket do curated_db
-#   - s3 no bucket de resultados do Athena
-#   - Lake Formation (se houver): SELECT no trusted_db e CREATE_TABLE/ALTER no curated_db
+#   - s3:PutObject / GetObject / DeleteObject / ListBucket no S3 do curated_db
+#   - s3:PutObject / GetObject no bucket de resultados do Athena
+#   - Lake Formation (se houver): SELECT no trusted_db; CREATE_TABLE/INSERT no curated_db
 # =============================================================================
 
-import awswrangler as wr
+import time
+from urllib.parse import urlparse
+
 import boto3
 
 # -----------------------------------------------------------------------------
@@ -41,23 +40,30 @@ DATABASE_ORIGEM = "trusted_db"
 DATABASE_DESTINO = "curated_db"
 TABELA_DESTINO = "dsac_p1_sub2"
 
-# Caminho S3 da tabela de destino. None = descobre sozinho:
-#   - se a tabela já existe, usa o LOCATION dela;
-#   - senão, usa o LOCATION do database curated_db + /dsac_p1_sub2/
+# Caminho S3 da tabela de destino. None = usa o LOCATION da tabela (se já existir)
+# ou o LOCATION do database curated_db + /dsac_p1_sub2/
 S3_DESTINO = None                    # ex.: "s3://meu-bucket/curated/dsac_p1_sub2/"
 
-WORKGROUP = None                     # workgroup do Athena (None = primary)
-REGIAO = None                        # ex.: "sa-east-1" (None = região padrão das credenciais)
+# Onde o Athena grava o resultado das consultas. None = usa o configurado no workgroup.
+S3_RESULTADOS_ATHENA = None          # ex.: "s3://meu-bucket/athena-results/"
+WORKGROUP = "primary"
+REGIAO = None                        # ex.: "sa-east-1" (None = região padrão do ambiente)
 
 if not (len(ANO) == 4 and ANO.isdigit()):
     raise ValueError("ANO deve ter 4 dígitos, ex.: 2025")
 
 sessao = boto3.Session(region_name=REGIAO)
+athena = sessao.client("athena")
+glue = sessao.client("glue")
+s3 = sessao.client("s3")
+
+TABELA = f"{DATABASE_DESTINO}.{TABELA_DESTINO}"
 
 # -----------------------------------------------------------------------------
-# QUERY ORIGINAL (somente o ano foi parametrizado)
+# QUERY ORIGINAL (somente o ano e o database foram parametrizados; o ORDER BY
+# final foi retirado porque não tem efeito num INSERT)
 # -----------------------------------------------------------------------------
-SQL = f"""
+SQL_DSAC = f"""
 --BASE E INSTALAÇÕES NET FONE/CLARO FONE
 select servico_anatel,produto_anatel,sum(total) total
 from (
@@ -135,93 +141,133 @@ group by ano_mes,categoria
 group by ano,produto,indicador
 ) t3
 group by servico_anatel,produto_anatel
-order by servico_anatel
 """
 
 
 # -----------------------------------------------------------------------------
 # FUNÇÕES
 # -----------------------------------------------------------------------------
+def executar_athena(sql, database=DATABASE_ORIGEM):
+    """Executa um comando no Athena e espera terminar. Retorna o QueryExecutionId."""
+    params = {
+        "QueryString": sql,
+        "QueryExecutionContext": {"Database": database},
+        "WorkGroup": WORKGROUP,
+    }
+    if S3_RESULTADOS_ATHENA:
+        params["ResultConfiguration"] = {"OutputLocation": S3_RESULTADOS_ATHENA}
+
+    query_id = athena.start_query_execution(**params)["QueryExecutionId"]
+
+    while True:
+        status = athena.get_query_execution(QueryExecutionId=query_id)["QueryExecution"]["Status"]
+        estado = status["State"]
+        if estado == "SUCCEEDED":
+            return query_id
+        if estado in ("FAILED", "CANCELLED"):
+            raise RuntimeError(f"Athena {estado}: {status.get('StateChangeReason', '')}\nSQL:\n{sql[:500]}")
+        time.sleep(2)
+
+
+def ler_resultado(query_id):
+    """Lê o resultado de um SELECT do Athena como lista de dicionários."""
+    linhas, colunas = [], None
+    for pagina in athena.get_paginator("get_query_results").paginate(QueryExecutionId=query_id):
+        for row in pagina["ResultSet"]["Rows"]:
+            valores = [c.get("VarCharValue") for c in row["Data"]]
+            if colunas is None:          # 1ª linha = cabeçalho
+                colunas = valores
+                continue
+            linhas.append(dict(zip(colunas, valores)))
+    return linhas
+
+
 def descobrir_s3_destino():
-    """Define o caminho S3 da tabela de destino (ver comentário de S3_DESTINO)."""
+    """Caminho S3 da tabela: parâmetro > LOCATION da tabela > LOCATION do database."""
     if S3_DESTINO:
         return S3_DESTINO.rstrip("/") + "/"
-
-    # Tabela já existe: grava no mesmo LOCATION
-    if wr.catalog.does_table_exist(database=DATABASE_DESTINO, table=TABELA_DESTINO,
-                                   boto3_session=sessao):
-        local = wr.catalog.get_table_location(database=DATABASE_DESTINO, table=TABELA_DESTINO,
-                                              boto3_session=sessao)
-        return local.rstrip("/") + "/"
-
-    # Tabela nova: LOCATION do database curated_db + nome da tabela
-    db = sessao.client("glue").get_database(Name=DATABASE_DESTINO)["Database"]
-    local_db = db.get("LocationUri")
+    try:
+        tabela = glue.get_table(DatabaseName=DATABASE_DESTINO, Name=TABELA_DESTINO)["Table"]
+        return tabela["StorageDescriptor"]["Location"].rstrip("/") + "/"
+    except glue.exceptions.EntityNotFoundException:
+        pass
+    local_db = glue.get_database(Name=DATABASE_DESTINO)["Database"].get("LocationUri")
     if not local_db:
         raise ValueError(
-            f"O database {DATABASE_DESTINO} não tem LOCATION definido no Glue. "
+            f"O database {DATABASE_DESTINO} não tem LOCATION no Glue. "
             "Preencha S3_DESTINO com o caminho S3 da tabela."
         )
     return local_db.rstrip("/") + f"/{TABELA_DESTINO}/"
 
 
+def apagar_prefixo_s3(caminho_s3):
+    """Apaga todos os arquivos de um prefixo S3 (dados antigos do ano reprocessado)."""
+    url = urlparse(caminho_s3)
+    bucket, prefixo = url.netloc, url.path.lstrip("/")
+    total = 0
+    for pagina in s3.get_paginator("list_objects_v2").paginate(Bucket=bucket, Prefix=prefixo):
+        objetos = [{"Key": o["Key"]} for o in pagina.get("Contents", [])]
+        if objetos:
+            s3.delete_objects(Bucket=bucket, Delete={"Objects": objetos, "Quiet": True})
+            total += len(objetos)
+    return total
+
+
 # -----------------------------------------------------------------------------
-# 1. EXECUTA A QUERY NO ATHENA (lendo do trusted_db)
+# 1. CRIA A TABELA DE DESTINO (se ainda não existir)
 # -----------------------------------------------------------------------------
-print(f"Executando query no Athena ({DATABASE_ORIGEM}) para o ano {ANO}...")
-df = wr.athena.read_sql_query(
-    sql=SQL,
-    database=DATABASE_ORIGEM,
-    workgroup=WORKGROUP,
-    ctas_approach=False,       # não cria tabelas temporárias no trusted_db
-    boto3_session=sessao,
+caminho = descobrir_s3_destino()
+print(f"Destino: {TABELA} em {caminho}")
+
+executar_athena(f"""
+CREATE EXTERNAL TABLE IF NOT EXISTS {TABELA} (
+    servico_anatel string COMMENT 'Código do serviço Anatel (NVTF)',
+    produto_anatel string COMMENT 'Produto Anatel',
+    total          double COMMENT 'Quantidade total no ano'
 )
+COMMENT 'DSAC - Assinatura, Habilitação e Troncos da Telefonia Fixa'
+PARTITIONED BY (ano string)
+STORED AS PARQUET
+LOCATION '{caminho}'
+TBLPROPERTIES ('parquet.compression'='SNAPPY')
+""", database=DATABASE_DESTINO)
 
 # -----------------------------------------------------------------------------
-# 2. VALIDAÇÕES E AJUSTES
+# 2. REMOVE O ANO QUE SERÁ REPROCESSADO (evita duplicar ao rodar de novo)
 # -----------------------------------------------------------------------------
-if df.empty:
-    raise ValueError(f"Nenhum registro encontrado no {DATABASE_ORIGEM} para o ano {ANO}")
+executar_athena(f"ALTER TABLE {TABELA} DROP IF EXISTS PARTITION (ano = '{ANO}')",
+                database=DATABASE_DESTINO)
+apagados = apagar_prefixo_s3(f"{caminho}ano={ANO}/")
+print(f"Ano {ANO} limpo no destino ({apagados} arquivo(s) antigo(s) removido(s))")
 
-qtd_nd = int((df["servico_anatel"] == "ND").sum())
+# -----------------------------------------------------------------------------
+# 3. CALCULA E GRAVA (a query roda no Athena lendo o trusted_db)
+# -----------------------------------------------------------------------------
+print(f"Executando DSAC {ANO} e gravando em {TABELA} ...")
+executar_athena(f"""
+INSERT INTO {TABELA}
+SELECT servico_anatel, produto_anatel, cast(total as double) total, '{ANO}' ano
+FROM ( {SQL_DSAC} ) dsac
+""")
+
+# -----------------------------------------------------------------------------
+# 4. CONFERE O RESULTADO GRAVADO
+# -----------------------------------------------------------------------------
+resultado = ler_resultado(executar_athena(
+    f"SELECT servico_anatel, produto_anatel, total FROM {TABELA} "
+    f"WHERE ano = '{ANO}' ORDER BY servico_anatel",
+    database=DATABASE_DESTINO,
+))
+
+if not resultado:
+    raise ValueError(f"Nenhum registro gravado para o ano {ANO} (verifique os dados do {DATABASE_ORIGEM})")
+
+qtd_nd = sum(1 for r in resultado if r["servico_anatel"] == "ND")
 if qtd_nd:
     print(f"ATENÇÃO: {qtd_nd} linha(s) sem de/para Anatel (ND)")
 
-df["total"] = df["total"].astype("float64")   # tipo estável entre execuções
-df["ano"] = ANO                               # coluna de partição
+print(f"\n{len(resultado)} linha(s) gravadas em {TABELA} (ano={ANO}):")
+for r in resultado:
+    print(f"  {r['servico_anatel']:<14} {r['produto_anatel']:<75} {r['total']}")
 
-print(f"{len(df)} linha(s) calculadas:")
-print(df.to_string(index=False))
-
-# -----------------------------------------------------------------------------
-# 3. GRAVA NO ATHENA: curated_db.dsac_p1_sub2 (Parquet no S3, partição por ano)
-#    overwrite_partitions = substitui só o ano processado; os outros anos ficam.
-# -----------------------------------------------------------------------------
-caminho = descobrir_s3_destino()
-print(f"Gravando {DATABASE_DESTINO}.{TABELA_DESTINO} em {caminho} ...")
-
-wr.s3.to_parquet(
-    df=df,
-    path=caminho,
-    dataset=True,
-    mode="overwrite_partitions",
-    partition_cols=["ano"],
-    database=DATABASE_DESTINO,
-    table=TABELA_DESTINO,
-    dtype={
-        "servico_anatel": "string",
-        "produto_anatel": "string",
-        "total": "double",
-        "ano": "string",
-    },
-    description="DSAC - Assinatura, Habilitação e Troncos da Telefonia Fixa (por serviço/produto Anatel)",
-    columns_comments={
-        "servico_anatel": "Código do serviço Anatel (NVTF)",
-        "produto_anatel": "Produto Anatel",
-        "total": "Quantidade total no ano",
-        "ano": "Ano de referência (partição)",
-    },
-    boto3_session=sessao,
-)
-
-print(f"Concluído. Consulte no Athena: SELECT * FROM {DATABASE_DESTINO}.{TABELA_DESTINO} WHERE ano = '{ANO}'")
+print(f"\nConsulte no Athena: SELECT * FROM {TABELA} WHERE ano = '{ANO}'")
