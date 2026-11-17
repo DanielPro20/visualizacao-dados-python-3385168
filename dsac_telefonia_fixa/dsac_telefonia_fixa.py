@@ -1,249 +1,227 @@
-%idle_timeout 60
-%glue_version 5.0
-%worker_type G.1X
-%number_of_workers 2
-
 # =============================================================================
 # DSAC - Dados de Assinatura, Habilitação e Troncos da Telefonia Fixa
 # -----------------------------------------------------------------------------
-# Versão PySpark para AWS GLUE STUDIO NOTEBOOK.
-# Como usar: cole este conteúdo inteiro em UMA célula do notebook e execute.
+# Python (sem Spark) usando AWS SDK for pandas (awswrangler).
 #
-# Origem (Athena / Glue Data Catalog, database "trusted_db"):
-#   trusted_db.dsac_net_fone | trusted_db.dsac_claro_fone | trusted_db.dsac_sumexec
+#   Origem : Athena, database trusted_db
+#            (dsac_net_fone, dsac_claro_fone, dsac_sumexec)
+#   Destino: Athena, database curated_db, tabela dsac_p1_sub2
+#            (Parquet no S3, particionado por ano)
 #
-# Blocos (iguais ao SQL original):
-#   1. Base e Instalações NET FONE + CLARO FONE (Residencial x Empresa)
-#   2. Base e Instalações CLARO FONE (PUCs Local / Outros Serviços)
-#   3. Base e Ativações E1 Empresarial (arredondado por mês antes da soma do ano)
-#   Obs.: como no SQL, dsac_claro_fone entra nos blocos 1 e 2.
+# Como funciona:
+#   1. A query SQL original roda no próprio Athena (o processamento pesado fica lá).
+#   2. O resultado (poucas linhas) volta como DataFrame pandas.
+#   3. É gravado em Parquet no S3 e registrado no Glue Catalog como
+#      curated_db.dsac_p1_sub2. Reprocessar um ano substitui só aquele ano.
 #
-# As linhas com % no topo configuram a sessão (só valem antes de ela iniciar).
+# Onde rodar: Jupyter (cole numa célula) ou como script (python dsac_telefonia_fixa.py).
+#   pip install awswrangler
+#   Credenciais AWS: aws configure / variáveis de ambiente / role da máquina.
+#   Em AWS Glue Python Shell: job parameter --additional-python-modules awswrangler
 #
-# PRÉ-REQUISITO IAM (role Glue_Service) - sem isso a sessão não inicia
-# ("not authorized to perform: iam:PassRole"). Política inline na role:
-#   {"Version": "2012-10-17", "Statement": [{
-#     "Effect": "Allow", "Action": "iam:PassRole",
-#     "Resource": "arn:aws:iam::591667019086:role/Glue_Service",
-#     "Condition": {"StringLike": {"iam:PassedToService": "glue.amazonaws.com"}}}]}
-# A role também precisa ler o trusted_db (glue:GetDatabase/GetTable/GetPartitions,
-# s3:GetObject/ListBucket nos buckets das tabelas e, se houver Lake Formation,
-# SELECT nas 3 tabelas).
+# Permissões necessárias (usuário ou role que executa):
+#   - athena:StartQueryExecution / GetQueryExecution / GetQueryResults
+#   - glue:GetDatabase / GetTable / GetPartitions (trusted_db e curated_db)
+#   - glue:CreateTable / UpdateTable / BatchCreatePartition (curated_db)
+#   - s3:GetObject / ListBucket nos buckets do trusted_db
+#   - s3:PutObject / DeleteObject / ListBucket no bucket do curated_db
+#   - s3 no bucket de resultados do Athena
+#   - Lake Formation (se houver): SELECT no trusted_db e CREATE_TABLE/ALTER no curated_db
 # =============================================================================
 
-from awsglue.context import GlueContext
-from pyspark.context import SparkContext
-from pyspark.sql import functions as F
+import awswrangler as wr
+import boto3
 
 # -----------------------------------------------------------------------------
 # PARÂMETROS (edite aqui)
 # -----------------------------------------------------------------------------
-ANO = "2025"                 # ano de referência
-DATABASE = "trusted_db"      # database (owner) das tabelas no Athena
+ANO = "2025"                         # ano de referência
 
-SAIDA_S3 = None              # ex.: "s3://meu-bucket/refined/dsac_telefonia_fixa/"  (None = não grava)
-SAIDA_TABELA = None          # ex.: "refined_db.dsac_telefonia_fixa"  (None = não registra no Athena)
+DATABASE_ORIGEM = "trusted_db"
+DATABASE_DESTINO = "curated_db"
+TABELA_DESTINO = "dsac_p1_sub2"
+
+# Caminho S3 da tabela de destino. None = descobre sozinho:
+#   - se a tabela já existe, usa o LOCATION dela;
+#   - senão, usa o LOCATION do database curated_db + /dsac_p1_sub2/
+S3_DESTINO = None                    # ex.: "s3://meu-bucket/curated/dsac_p1_sub2/"
+
+WORKGROUP = None                     # workgroup do Athena (None = primary)
+REGIAO = None                        # ex.: "sa-east-1" (None = região padrão das credenciais)
+
+if not (len(ANO) == 4 and ANO.isdigit()):
+    raise ValueError("ANO deve ter 4 dígitos, ex.: 2025")
+
+sessao = boto3.Session(region_name=REGIAO)
 
 # -----------------------------------------------------------------------------
-# SESSÃO SPARK (reaproveita a sessão do Glue Studio)
+# QUERY ORIGINAL (somente o ano foi parametrizado)
 # -----------------------------------------------------------------------------
-sc = SparkContext.getOrCreate()
-glueContext = GlueContext(sc)
-spark = glueContext.spark_session
-spark.conf.set("spark.sql.sources.partitionOverwriteMode", "dynamic")  # overwrite só do ano gravado
+SQL = f"""
+--BASE E INSTALAÇÕES NET FONE/CLARO FONE
+select servico_anatel,produto_anatel,sum(total) total
+from (
+select ano,produto,indicador,
+case when indicador='Base de Conectados' and tipo_produto='RESIDENCIAL' then 'NVTF.1.3.1.1'
+     when indicador='Base de Conectados' and tipo_produto='EMPRESA' then 'NVTF.3.2.1.1'
+     when indicador='Instalação' and tipo_produto='RESIDENCIAL' then 'NVTF.1.3.2.1'
+     when indicador='Instalação' and tipo_produto='EMPRESA' then 'NVTF.3.2.2.1'
+       else 'ND' end servico_anatel,
+case when indicador='Base de Conectados' and tipo_produto='RESIDENCIAL' then 'Assinatura Residencial'
+     when indicador='Base de Conectados' and tipo_produto='EMPRESA' then 'Assinatura Não Residencial'
+     when indicador='Instalação' and tipo_produto='RESIDENCIAL' then 'Habilitação Residencial'
+     when indicador='Instalação' and tipo_produto='EMPRESA' then 'Habilitação Não Residencial'
+       else 'ND' end produto_anatel,
+sum(total) total
+from (
+select substr(cast(a.data_base as varchar),1,4) ano,a.nm_tipo_produto_marca_bi produto,a.nm_indicador_negocio_bi indicador,
+       case when a.nm_linha_negocio_bi like '%Empresa%' then 'EMPRESA'
+         else 'RESIDENCIAL' end tipo_produto, sum(a.qtde) total
+from {DATABASE_ORIGEM}.dsac_net_fone a
+where cast(a.data_base as varchar) like '{ANO}%'
+and a.nm_indicador_negocio_bi in ('Base de Conectados','Instalação')
+group by substr(cast(a.data_base as varchar),1,4),a.nm_tipo_produto_marca_bi,a.nm_indicador_negocio_bi,a.nm_linha_negocio_bi
+union all
+select substr(cast(a.data_base as varchar),1,4) ano,a.nm_tipo_produto_marca_bi produto,a.nm_indicador_negocio_bi indicador,
+       case when a.nm_linha_negocio_bi like '%Empresa%' then 'EMPRESA'
+         else 'RESIDENCIAL' end tipo_produto, sum(a.qtde) total
+from {DATABASE_ORIGEM}.dsac_claro_fone a
+where cast(a.data_base as varchar) like '{ANO}%'
+and a.nm_indicador_negocio_bi in ('Base de Conectados','Instalação')
+group by substr(cast(a.data_base as varchar),1,4),a.nm_tipo_produto_marca_bi,a.nm_indicador_negocio_bi,a.nm_linha_negocio_bi
+) t1
+group by ano,produto,indicador,tipo_produto
+
+union all
+
+--BASE E INSTALAÇÕES CLARO FONE
+select substr(cast(a.data_base as varchar),1,4) ano,a.nm_tipo_produto_marca_bi produto,a.nm_indicador_negocio_bi indicador,
+       case when a.nm_indicador_negocio_bi='Base de Conectados' and a.nm_tipo_produto_marca_bi='Claro Fone' then 'NVTF.8.2.1.1'
+            when a.nm_indicador_negocio_bi='Instalação' and a.nm_tipo_produto_marca_bi='Claro Fone' then 'NVTF.8.3.1.1'
+              else 'ND' end servico_anatel,
+       case when a.nm_indicador_negocio_bi='Base de Conectados' and a.nm_tipo_produto_marca_bi='Claro Fone' then 'PUCs Local'
+            when a.nm_indicador_negocio_bi='Instalação' and a.nm_tipo_produto_marca_bi='Claro Fone' then 'Outras linhas de produto_Outros Serviços_Outros Serviços_Outros Serviços'
+              else 'ND' end produto_anatel,
+       sum(a.qtde) total
+from {DATABASE_ORIGEM}.dsac_claro_fone a
+where cast(a.data_base as varchar) like '{ANO}%'
+and a.nm_indicador_negocio_bi in ('Base de Conectados','Instalação')
+group by substr(cast(a.data_base as varchar),1,4),a.nm_tipo_produto_marca_bi,a.nm_indicador_negocio_bi
+
+union all
+
+--BASE E ATIVAÇÕES E1S EMPRESARIAL
+select ano,produto,indicador,
+case when indicador='BASE' then 'NVTF.2.2.1.1'
+     when indicador='ATIVAÇÕES' then 'NVTF.2.2.2.1'
+       else 'ND' end servico_anatel,
+case when indicador='BASE' then 'Assinatura Tronco'
+     when indicador='ATIVAÇÕES' then 'Habilitação Tronco'
+       else 'ND' end produto_anatel,
+sum(total) total
+from (
+select substr(cast(ano_mes as varchar),1,4) ano,categoria produto,'BASE' indicador, round(sum(qtd_base),0) total
+from {DATABASE_ORIGEM}.dsac_sumexec
+where categoria like '%E1%'
+and cast(ano_mes as varchar) like '{ANO}%'
+group by ano_mes,categoria
+union all
+select substr(cast(ano_mes as varchar),1,4) ano,categoria produto,'ATIVAÇÕES' indicador, round(sum(qtd_ativ),0) total
+from {DATABASE_ORIGEM}.dsac_sumexec
+where categoria like '%E1%'
+and cast(ano_mes as varchar) like '{ANO}%'
+group by ano_mes,categoria
+) t2
+group by ano,produto,indicador
+) t3
+group by servico_anatel,produto_anatel
+order by servico_anatel
+"""
 
 
 # -----------------------------------------------------------------------------
-# FUNÇÕES AUXILIARES
+# FUNÇÕES
 # -----------------------------------------------------------------------------
-def ler_tabela(tabela):
-    """Lê database.tabela do Glue Data Catalog, validando se a tabela existe."""
-    if spark.sql(f"SHOW TABLES IN {DATABASE} LIKE '{tabela}'").count() == 0:
+def descobrir_s3_destino():
+    """Define o caminho S3 da tabela de destino (ver comentário de S3_DESTINO)."""
+    if S3_DESTINO:
+        return S3_DESTINO.rstrip("/") + "/"
+
+    # Tabela já existe: grava no mesmo LOCATION
+    if wr.catalog.does_table_exist(database=DATABASE_DESTINO, table=TABELA_DESTINO,
+                                   boto3_session=sessao):
+        local = wr.catalog.get_table_location(database=DATABASE_DESTINO, table=TABELA_DESTINO,
+                                              boto3_session=sessao)
+        return local.rstrip("/") + "/"
+
+    # Tabela nova: LOCATION do database curated_db + nome da tabela
+    db = sessao.client("glue").get_database(Name=DATABASE_DESTINO)["Database"]
+    local_db = db.get("LocationUri")
+    if not local_db:
         raise ValueError(
-            f"Tabela {DATABASE}.{tabela} não encontrada no Glue Data Catalog. "
-            "Verifique --enable-glue-datacatalog e as permissões (IAM / Lake Formation)."
+            f"O database {DATABASE_DESTINO} não tem LOCATION definido no Glue. "
+            "Preencha S3_DESTINO com o caminho S3 da tabela."
         )
-    return spark.table(f"{DATABASE}.{tabela}")
-
-
-def ano_de(coluna):
-    """substr(cast(coluna as varchar), 1, 4)"""
-    return F.substring(F.col(coluna).cast("string"), 1, 4)
-
-
-def filtro_ano(coluna):
-    """cast(coluna as varchar) like 'ANO%'"""
-    return F.col(coluna).cast("string").startswith(ANO)
-
-
-def case_when(regras):
-    """CASE WHEN cond1 THEN v1 WHEN cond2 THEN v2 ... ELSE 'ND' END"""
-    expr = F.when(regras[0][0], regras[0][1])
-    for condicao, valor in regras[1:]:
-        expr = expr.when(condicao, valor)
-    return expr.otherwise("ND")
-
-
-COLUNAS = ["ano", "produto", "indicador", "servico_anatel", "produto_anatel", "total"]
-INDICADORES = ["Base de Conectados", "Instalação"]
-
-# -----------------------------------------------------------------------------
-# LEITURA DAS TABELAS (somente as colunas usadas)
-# -----------------------------------------------------------------------------
-colunas_fone = ["data_base", "nm_tipo_produto_marca_bi", "nm_indicador_negocio_bi",
-                "nm_linha_negocio_bi", "qtde"]
-
-df_net = ler_tabela("dsac_net_fone").select(*colunas_fone)
-df_claro = ler_tabela("dsac_claro_fone").select(*colunas_fone)
-df_sumexec = ler_tabela("dsac_sumexec").select("ano_mes", "categoria", "qtd_base", "qtd_ativ")
+    return local_db.rstrip("/") + f"/{TABELA_DESTINO}/"
 
 
 # -----------------------------------------------------------------------------
-# BLOCO 1 - BASE E INSTALAÇÕES NET FONE / CLARO FONE
+# 1. EXECUTA A QUERY NO ATHENA (lendo do trusted_db)
 # -----------------------------------------------------------------------------
-def agrega_fone(df):
-    """Subquery t1: agrupa por ano, produto, indicador e linha de negócio."""
-    return (
-        df.where(filtro_ano("data_base"))
-        .where(F.col("nm_indicador_negocio_bi").isin(INDICADORES))
-        .groupBy(
-            ano_de("data_base").alias("ano"),
-            F.col("nm_tipo_produto_marca_bi").alias("produto"),
-            F.col("nm_indicador_negocio_bi").alias("indicador"),
-            "nm_linha_negocio_bi",
-        )
-        .agg(F.sum("qtde").alias("total"))
-        # like '%Empresa%' -> EMPRESA ; demais (inclusive nulo) -> RESIDENCIAL
-        .withColumn("tipo_produto",
-                    F.when(F.col("nm_linha_negocio_bi").contains("Empresa"), "EMPRESA")
-                    .otherwise("RESIDENCIAL"))
-    )
-
-
-t1 = agrega_fone(df_net).unionByName(agrega_fone(df_claro))
-
-ind, tipo = F.col("indicador"), F.col("tipo_produto")
-base_res = (ind == "Base de Conectados") & (tipo == "RESIDENCIAL")
-base_emp = (ind == "Base de Conectados") & (tipo == "EMPRESA")
-inst_res = (ind == "Instalação") & (tipo == "RESIDENCIAL")
-inst_emp = (ind == "Instalação") & (tipo == "EMPRESA")
-
-bloco1 = (
-    t1.groupBy("ano", "produto", "indicador", "tipo_produto")
-    .agg(F.sum("total").alias("total"))
-    .withColumn("servico_anatel", case_when([
-        (base_res, "NVTF.1.3.1.1"),
-        (base_emp, "NVTF.3.2.1.1"),
-        (inst_res, "NVTF.1.3.2.1"),
-        (inst_emp, "NVTF.3.2.2.1"),
-    ]))
-    .withColumn("produto_anatel", case_when([
-        (base_res, "Assinatura Residencial"),
-        (base_emp, "Assinatura Não Residencial"),
-        (inst_res, "Habilitação Residencial"),
-        (inst_emp, "Habilitação Não Residencial"),
-    ]))
-    .select(*COLUNAS)
+print(f"Executando query no Athena ({DATABASE_ORIGEM}) para o ano {ANO}...")
+df = wr.athena.read_sql_query(
+    sql=SQL,
+    database=DATABASE_ORIGEM,
+    workgroup=WORKGROUP,
+    ctas_approach=False,       # não cria tabelas temporárias no trusted_db
+    boto3_session=sessao,
 )
 
 # -----------------------------------------------------------------------------
-# BLOCO 2 - BASE E INSTALAÇÕES CLARO FONE
+# 2. VALIDAÇÕES E AJUSTES
 # -----------------------------------------------------------------------------
-prod = F.col("produto")
-base_claro = (ind == "Base de Conectados") & (prod == "Claro Fone")
-inst_claro = (ind == "Instalação") & (prod == "Claro Fone")
+if df.empty:
+    raise ValueError(f"Nenhum registro encontrado no {DATABASE_ORIGEM} para o ano {ANO}")
 
-bloco2 = (
-    df_claro.where(filtro_ano("data_base"))
-    .where(F.col("nm_indicador_negocio_bi").isin(INDICADORES))
-    .groupBy(
-        ano_de("data_base").alias("ano"),
-        F.col("nm_tipo_produto_marca_bi").alias("produto"),
-        F.col("nm_indicador_negocio_bi").alias("indicador"),
-    )
-    .agg(F.sum("qtde").alias("total"))
-    .withColumn("servico_anatel", case_when([
-        (base_claro, "NVTF.8.2.1.1"),
-        (inst_claro, "NVTF.8.3.1.1"),
-    ]))
-    .withColumn("produto_anatel", case_when([
-        (base_claro, "PUCs Local"),
-        (inst_claro, "Outras linhas de produto_Outros Serviços_Outros Serviços_Outros Serviços"),
-    ]))
-    .select(*COLUNAS)
-)
-
-# -----------------------------------------------------------------------------
-# BLOCO 3 - BASE E ATIVAÇÕES E1 EMPRESARIAL
-# Soma e arredonda POR MÊS (group by ano_mes, categoria) e depois soma no ano.
-# BASE e ATIVAÇÕES saem da mesma leitura e viram linhas com stack().
-# -----------------------------------------------------------------------------
-t2 = (
-    df_sumexec.where(F.col("categoria").contains("E1"))      # like '%E1%'
-    .where(filtro_ano("ano_mes"))
-    .groupBy("ano_mes", "categoria")
-    .agg(
-        F.round(F.sum("qtd_base"), 0).alias("tot_base"),
-        F.round(F.sum("qtd_ativ"), 0).alias("tot_ativ"),
-    )
-    .select(
-        ano_de("ano_mes").alias("ano"),
-        F.col("categoria").alias("produto"),
-        F.expr("stack(2, 'BASE', tot_base, 'ATIVAÇÕES', tot_ativ) as (indicador, total)"),
-    )
-)
-
-bloco3 = (
-    t2.groupBy("ano", "produto", "indicador")
-    .agg(F.sum("total").alias("total"))
-    .withColumn("servico_anatel", case_when([
-        (ind == "BASE", "NVTF.2.2.1.1"),
-        (ind == "ATIVAÇÕES", "NVTF.2.2.2.1"),
-    ]))
-    .withColumn("produto_anatel", case_when([
-        (ind == "BASE", "Assinatura Tronco"),
-        (ind == "ATIVAÇÕES", "Habilitação Tronco"),
-    ]))
-    .select(*COLUNAS)
-)
-
-# -----------------------------------------------------------------------------
-# RESULTADO FINAL (SELECT externo: soma por serviço/produto Anatel)
-# -----------------------------------------------------------------------------
-resultado = (
-    bloco1.unionByName(bloco2).unionByName(bloco3)
-    .groupBy("servico_anatel", "produto_anatel")
-    .agg(F.sum("total").alias("total"))
-    .orderBy("servico_anatel")
-    .cache()
-)
-
-qtd = resultado.count()
-if qtd == 0:
-    raise ValueError(f"Nenhum registro encontrado para o ano {ANO}")
-
-qtd_nd = resultado.where(F.col("servico_anatel") == "ND").count()
+qtd_nd = int((df["servico_anatel"] == "ND").sum())
 if qtd_nd:
     print(f"ATENÇÃO: {qtd_nd} linha(s) sem de/para Anatel (ND)")
 
-print(f"DSAC telefonia fixa {ANO}: {qtd} linha(s)")
-resultado.show(100, truncate=False)
+df["total"] = df["total"].astype("float64")   # tipo estável entre execuções
+df["ano"] = ANO                               # coluna de partição
+
+print(f"{len(df)} linha(s) calculadas:")
+print(df.to_string(index=False))
 
 # -----------------------------------------------------------------------------
-# GRAVAÇÃO (opcional) - Parquet no S3 particionado por ano; com SAIDA_TABELA
-# a tabela é registrada no Glue Catalog e fica consultável no Athena.
+# 3. GRAVA NO ATHENA: curated_db.dsac_p1_sub2 (Parquet no S3, partição por ano)
+#    overwrite_partitions = substitui só o ano processado; os outros anos ficam.
 # -----------------------------------------------------------------------------
-if SAIDA_S3:
-    saida = resultado.withColumn("ano", F.lit(ANO)).coalesce(1)
-    if SAIDA_TABELA:
-        db_dest, tb_dest = SAIDA_TABELA.split(".")
-        if spark.sql(f"SHOW TABLES IN {db_dest} LIKE '{tb_dest}'").count() > 0:
-            # tabela já existe: substitui só a partição do ano processado
-            saida.select(*spark.table(SAIDA_TABELA).columns).write.insertInto(SAIDA_TABELA, overwrite=True)
-        else:
-            (saida.write.mode("overwrite").format("parquet").partitionBy("ano")
-             .option("path", SAIDA_S3).saveAsTable(SAIDA_TABELA))
-        print(f"Gravado em {SAIDA_TABELA} ({SAIDA_S3})")
-    else:
-        saida.write.mode("overwrite").format("parquet").partitionBy("ano").save(SAIDA_S3)
-        print(f"Gravado em {SAIDA_S3}")
+caminho = descobrir_s3_destino()
+print(f"Gravando {DATABASE_DESTINO}.{TABELA_DESTINO} em {caminho} ...")
+
+wr.s3.to_parquet(
+    df=df,
+    path=caminho,
+    dataset=True,
+    mode="overwrite_partitions",
+    partition_cols=["ano"],
+    database=DATABASE_DESTINO,
+    table=TABELA_DESTINO,
+    dtype={
+        "servico_anatel": "string",
+        "produto_anatel": "string",
+        "total": "double",
+        "ano": "string",
+    },
+    description="DSAC - Assinatura, Habilitação e Troncos da Telefonia Fixa (por serviço/produto Anatel)",
+    columns_comments={
+        "servico_anatel": "Código do serviço Anatel (NVTF)",
+        "produto_anatel": "Produto Anatel",
+        "total": "Quantidade total no ano",
+        "ano": "Ano de referência (partição)",
+    },
+    boto3_session=sessao,
+)
+
+print(f"Concluído. Consulte no Athena: SELECT * FROM {DATABASE_DESTINO}.{TABELA_DESTINO} WHERE ano = '{ANO}'")
