@@ -31,7 +31,11 @@ A lógica foi mantida 1:1 com o SQL original, inclusive:
     - a tabela dsac_claro_fone é contabilizada nos blocos 1 E 2 (como no SQL);
     - no bloco 3 o arredondamento é feito por mês (ano_mes) antes da soma anual.
 
-Execução (exemplos):
+Execução: este arquivo único roda tanto via spark-submit / AWS Glue Job quanto
+colado inteiro em UMA célula de Jupyter (o ano e os destinos podem ser alterados
+nos defaults de parse_args).
+
+Exemplos:
 
     # Apenas exibe o resultado
     spark-submit dsac_telefonia_fixa.py --ano 2025
@@ -415,8 +419,18 @@ def main(argv: Optional[list[str]] = None) -> int:
         log.exception("Falha na execução do job")
         return 1
     finally:
-        spark.stop()
+        # Em notebook (Jupyter/Glue Studio/EMR Studio) a sessão é compartilhada: não para
+        if not EM_NOTEBOOK:
+            spark.stop()
 
+
+# Detecta se o arquivo está rodando dentro de um notebook Jupyter
+EM_NOTEBOOK = "ipykernel" in sys.modules
 
 if __name__ == "__main__":
-    sys.exit(main())
+    if EM_NOTEBOOK:
+        # Jupyter: executa sem argumentos de linha de comando e sem encerrar o kernel
+        codigo_saida = main([])
+    else:
+        # spark-submit / Glue Job: código de saída sinaliza sucesso ou falha ao orquestrador
+        sys.exit(main())
