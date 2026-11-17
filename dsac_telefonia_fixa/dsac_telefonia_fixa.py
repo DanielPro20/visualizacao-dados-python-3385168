@@ -380,7 +380,9 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
 
 
 def main(argv: Optional[list[str]] = None) -> int:
-    logging.basicConfig(level=logging.INFO,
+    # force=True: Glue/EMR/Jupyter já configuram o logging e, sem isso, nada aparece.
+    # stream=stdout: o log sai na saída da célula / no CloudWatch (output).
+    logging.basicConfig(level=logging.INFO, stream=sys.stdout, force=True,
                         format="%(asctime)s %(levelname)s %(name)s - %(message)s")
     args = parse_args(argv)
     spark = criar_spark(f"dsac_telefonia_fixa_{args.ano}")
@@ -424,13 +426,16 @@ def main(argv: Optional[list[str]] = None) -> int:
             spark.stop()
 
 
-# Detecta se o arquivo está rodando dentro de um notebook Jupyter
-EM_NOTEBOOK = "ipykernel" in sys.modules
+# Detecta notebook: ao rodar como arquivo (spark-submit / Glue Job) o Python define
+# __file__; colado numa célula (Jupyter, Glue Studio, EMR Studio, SageMaker - inclusive
+# sessões remotas via Livy/sparkmagic, onde não existe ipykernel) __file__ não existe.
+EM_NOTEBOOK = "__file__" not in globals()
 
 if __name__ == "__main__":
     if EM_NOTEBOOK:
-        # Jupyter: executa sem argumentos de linha de comando e sem encerrar o kernel
+        # Notebook: executa sem argumentos, sem sys.exit e sem parar a sessão Spark
         codigo_saida = main([])
+        print(f"Código de saída: {codigo_saida} (0 = sucesso | 1 = erro de execução | 2 = erro de validação)")
     else:
         # spark-submit / Glue Job: código de saída sinaliza sucesso ou falha ao orquestrador
         sys.exit(main())
