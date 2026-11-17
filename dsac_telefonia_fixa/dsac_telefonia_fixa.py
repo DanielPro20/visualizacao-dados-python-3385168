@@ -17,7 +17,7 @@ A lógica foi mantida 1:1 com o SQL original, inclusive:
 Execução (exemplos):
 
     spark-submit dsac_telefonia_fixa.py --ano 2025 \
-        --database meu_schema \
+        --database trusted_db \
         --saida-tabela meu_schema.dsac_telefonia_fixa_2025
 
     spark-submit dsac_telefonia_fixa.py --ano 2025 \
@@ -298,7 +298,7 @@ def gravar(df: DataFrame, tabela: Optional[str], path: Optional[str], formato: s
 def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(description="DSAC - Assinatura, Habilitação e Troncos da Telefonia Fixa")
     p.add_argument("--ano", default="2025", help="Ano de referência (default: 2025)")
-    p.add_argument("--database", default=None, help="Database/schema das tabelas de origem")
+    p.add_argument("--database", default="trusted_db", help="Database de origem (camada trusted)")
     p.add_argument("--tabela-net-fone", default="dsac_net_fone")
     p.add_argument("--tabela-claro-fone", default="dsac_claro_fone")
     p.add_argument("--tabela-sumexec", default="dsac_sumexec")
